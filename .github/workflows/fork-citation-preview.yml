@@ -1,0 +1,89 @@
+name: Build fork citation-preview GitHub release
+
+on:
+  push:
+    branches:
+      - release/cross-notebook-citations
+    paths:
+      - .github/workflows/fork-citation-preview.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    if: github.repository == 'sushmitxo/gemini-notebook-mcp-cli'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
+        with:
+          version: latest
+
+      - name: Lint, format and focused regression tests
+        run: |
+          uv run --dev ruff check .
+          uv run --dev ruff format --check .
+          uv run --dev pytest tests/services/test_cross_notebook.py tests/services/test_cross_notebook_citations.py tests/services/test_batch.py -q
+
+      - name: Build wheel and source archive
+        run: uv build
+
+      - name: Verify distribution contents
+        run: |
+          python - <<'PY'
+          from glob import glob
+          from zipfile import ZipFile
+          wheels = glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          with ZipFile(wheels[0]) as archive:
+              names = archive.namelist()
+              assert any(name.endswith("/services/cross_notebook.py") for name in names)
+              source = archive.read(next(name for name in names if name.endswith("/services/cross_notebook.py"))).decode()
+              assert '"references": result.get("references", [])' in source
+              assert '"citations": result.get("citations", {})' in source
+          print(f"Verified {wheels[0]}")
+          PY
+
+      - name: Create personal-fork preview release (not PyPI)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="citations-preview-v0.15.8.1"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+            exit 0
+          fi
+
+          cat > release-notes.md <<'NOTES'
+          Unofficial personal-fork preview of the Jacob Ben-David NotebookLM MCP CLI.
+
+          Based on upstream package version 0.15.8 plus the unmerged changes from
+          [upstream PR #384](https://github.com/jacob-bd/gemini-notebook-mcp-cli/pull/384).
+
+          Changes: cross_notebook_query now preserves per-notebook citations,
+          cited-text references, and conversation_id. Includes regression tests.
+
+          This is not an official upstream release and is not published to PyPI.
+          Distribution metadata intentionally retains the upstream version 0.15.8
+          to keep the PR minimal; install explicitly from this tag or wheel.
+
+          Install with uv:
+          uv tool install --force git+https://github.com/sushmitxo/gemini-notebook-mcp-cli.git@citations-preview-v0.15.8.1
+
+          To run directly:
+          uvx --from git+https://github.com/sushmitxo/gemini-notebook-mcp-cli.git@citations-preview-v0.15.8.1 notebooklm-mcp
+          NOTES
+
+          gh release create "$TAG" dist/*.whl dist/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "NotebookLM MCP 0.15.8 + cross-notebook citations (preview)" \
+            --notes-file release-notes.md \
+            --prerelease \
+            --latest=false
